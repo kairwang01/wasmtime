@@ -328,7 +328,8 @@ PY
 case "$MODE" in
   base)
     run_rust_tests rust-pooling-regression \
-      -p wasmtime-cli \
+      --manifest-path /app/Cargo.toml \
+      --package wasmtime-cli \
       --test all \
       --no-default-features \
       --features "$RUST_FEATURES" \
@@ -339,7 +340,8 @@ case "$MODE" in
     ;;
   new)
     run_rust_tests rust-page-size-1-pool \
-      -p wasmtime-cli \
+      --manifest-path /app/Cargo.toml \
+      --package wasmtime-cli \
       --test page_size_1_pool_b76df6 \
       --no-default-features \
       --features "$RUST_FEATURES" \
