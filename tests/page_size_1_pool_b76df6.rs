@@ -433,6 +433,64 @@ fn page_size_1_pool_mixed_decommit_recycles_both_pools() -> Result<()> {
 }
 
 #[test]
+fn page_size_1_pool_purges_dropped_modules_from_both_pools() -> Result<()> {
+    let mut pool = small_pool();
+    pool.max_unused_warm_slots(2)
+        .decommit_batch_size(1)
+        .page_size_1_memory_max_size(32)
+        .max_page_size_1_memories_per_component(1);
+    let engine = pooling_engine(pool)?;
+    let custom = Module::new(
+        &engine,
+        r#"(module
+            (memory (export "memory") 4 32 (pagesize 1))
+            (data (i32.const 0) "tiny")
+        )"#,
+    )?;
+    let ordinary = Module::new(
+        &engine,
+        r#"(module
+            (memory (export "memory") 1 1)
+            (data (i32.const 0) "ordinary")
+        )"#,
+    )?;
+
+    let custom_store = live_instance(&engine, &custom)?;
+    let ordinary_store = live_instance(&engine, &ordinary)?;
+    drop((custom_store, ordinary_store));
+    drop(custom);
+    drop(ordinary);
+
+    let replacement_custom = Module::new(
+        &engine,
+        r#"(module
+            (memory (export "memory") 4 32 (pagesize 1))
+            (data (i32.const 0) "new!")
+        )"#,
+    )?;
+    let (mut custom_store, custom_instance) = instance_with_handle(&engine, &replacement_custom)?;
+    let custom_memory = custom_instance
+        .get_memory(&mut custom_store, "memory")
+        .unwrap();
+    assert_eq!(&custom_memory.data(&custom_store)[..4], b"new!");
+
+    let replacement_ordinary = Module::new(
+        &engine,
+        r#"(module
+            (memory (export "memory") 1 1)
+            (data (i32.const 0) "replacement")
+        )"#,
+    )?;
+    let (mut ordinary_store, ordinary_instance) =
+        instance_with_handle(&engine, &replacement_ordinary)?;
+    let ordinary_memory = ordinary_instance
+        .get_memory(&mut ordinary_store, "memory")
+        .unwrap();
+    assert_eq!(&ordinary_memory.data(&ordinary_store)[..11], b"replacement");
+    Ok(())
+}
+
+#[test]
 fn page_size_1_pool_metrics_include_both_pools() -> Result<()> {
     let mut pool = small_pool();
     pool.decommit_batch_size(1)

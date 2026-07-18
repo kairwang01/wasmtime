@@ -218,6 +218,21 @@ compile_cpp() {
     -o "$output"
 }
 
+compile_c() {
+  local source="$1"
+  local output="$2"
+
+  cc -std=c11 \
+    -I crates/c-api/include \
+    -I "$C_API_HEADER_DIR/include" \
+    "$source" \
+    -L "$C_API_LIBRARY_DIR" \
+    "-Wl,-rpath,$PWD/$C_API_LIBRARY_DIR" \
+    -lwasmtime \
+    -pthread -ldl -lm \
+    -o "$output"
+}
+
 run_c_api_regression() {
   local report="$RUN_DIR/c-api-regression.xml"
   local log="$RUN_DIR/c-api-regression.log"
@@ -244,17 +259,35 @@ run_c_api_regression() {
 run_c_api_new() {
   local report="$RUN_DIR/c-api-page-size-1-pool.xml"
   local log="$RUN_DIR/c-api-page-size-1-pool.log"
-  local binary="$RUN_DIR/c-api-page-size-1-pool"
+  local cpp_binary="$RUN_DIR/c-api-page-size-1-pool-cpp"
 
   (
     build_c_api &&
       configure_c_api_headers &&
-      compile_cpp crates/c-api/tests/page_size_1_pool_config.cc "$binary" &&
-      "$binary"
+      compile_cpp crates/c-api/tests/page_size_1_pool_config_b76df6.cc "$cpp_binary" &&
+      "$cpp_binary"
   ) 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
 
   write_command_report "c-api-page-size-1-pool" "$status" "$log" "$report"
+  REPORTS+=("$report")
+  note_status "$status"
+}
+
+run_c_api_direct_new() {
+  local report="$RUN_DIR/c-api-page-size-1-pool-direct.xml"
+  local log="$RUN_DIR/c-api-page-size-1-pool-direct.log"
+  local binary="$RUN_DIR/c-api-page-size-1-pool-c"
+
+  (
+    build_c_api &&
+      configure_c_api_headers &&
+      compile_c crates/c-api/tests/page_size_1_pool_config_b76df6.c "$binary" &&
+      "$binary"
+  ) 2>&1 | tee "$log"
+  local status=${PIPESTATUS[0]}
+
+  write_command_report "c-api-page-size-1-pool-direct" "$status" "$log" "$report"
   REPORTS+=("$report")
   note_status "$status"
 }
@@ -307,12 +340,13 @@ case "$MODE" in
   new)
     run_rust_tests rust-page-size-1-pool \
       -p wasmtime-cli \
-      --test page_size_1_pool \
+      --test page_size_1_pool_b76df6 \
       --no-default-features \
       --features "$RUST_FEATURES" \
       -- \
       --test-threads=4
     run_c_api_new
+    run_c_api_direct_new
     ;;
   *)
     echo "unknown mode: $MODE (expected base or new)" >&2
