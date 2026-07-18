@@ -51,7 +51,7 @@
 //! [ColorGuard]: https://plas2022.github.io/files/pdf/SegueColorGuard.pdf
 
 use super::{
-    MemoryAllocationIndex,
+    MemoryAllocationIndex, MemoryPoolKind,
     index_allocator::{MemoryInModule, ModuleAffinityIndexAllocator, SlotId},
 };
 use crate::config::InstanceLimits;
@@ -66,6 +66,7 @@ use crate::{
     runtime::vm::mpk::{self, ProtectionKey, ProtectionMask},
     vm::HostAlignedByteCount,
 };
+use std::borrow::Cow;
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -140,6 +141,10 @@ pub struct MemoryPool {
     /// Keep track of protection keys handed out to initialized stores; this
     /// allows us to round-robin the assignment of stores to stripes.
     next_available_pkey: AtomicUsize,
+
+    kind: MemoryPoolKind,
+
+    max_memory_size: usize,
 }
 
 /// The state of memory for each slot in this pool.
@@ -175,31 +180,42 @@ enum ImageSlot {
 
 impl MemoryPool {
     /// Create a new `MemoryPool`.
-    pub fn new(config: &PoolingAllocationConfig, tunables: &Tunables) -> Result<Self> {
-        if u64::try_from(config.limits.max_memory_size).unwrap() > tunables.memory_reservation {
+    pub fn new(
+        config: &PoolingAllocationConfig,
+        tunables: &Tunables,
+        kind: MemoryPoolKind,
+    ) -> Result<Self> {
+        let max_memory_size = match kind {
+            MemoryPoolKind::Default => config.limits.max_memory_size,
+            MemoryPoolKind::PageSize1 => config.limits.page_size_1_memory_max_size,
+        };
+        if kind == MemoryPoolKind::Default
+            && u64::try_from(max_memory_size).unwrap() > tunables.memory_reservation
+        {
             bail!(
                 "maximum memory size of {:#x} bytes exceeds the configured \
                  memory reservation of {:#x} bytes",
-                config.limits.max_memory_size,
+                max_memory_size,
                 tunables.memory_reservation
             );
         }
-        let pkeys = match config.memory_protection_keys {
-            Enabled::Auto => {
+        let pkeys = match (kind, config.memory_protection_keys) {
+            (MemoryPoolKind::PageSize1, _) => &[],
+            (_, Enabled::Auto) => {
                 if mpk::is_supported() {
                     mpk::keys(config.max_memory_protection_keys)
                 } else {
                     &[]
                 }
             }
-            Enabled::Yes => {
+            (_, Enabled::Yes) => {
                 if mpk::is_supported() {
                     mpk::keys(config.max_memory_protection_keys)
                 } else {
                     bail!("mpk is disabled on this system")
                 }
             }
-            Enabled::No => &[],
+            (_, Enabled::No) => &[],
         };
 
         // This is a tricky bit of global state: when creating a memory pool
@@ -218,7 +234,7 @@ impl MemoryPool {
 
         // Create a slab layout and allocate it as a completely inaccessible
         // region to start--`PROT_NONE`.
-        let constraints = SlabConstraints::new(&config.limits, tunables, pkeys.len())?;
+        let constraints = SlabConstraints::new(&config.limits, tunables, pkeys.len(), kind)?;
         let layout = calculate(&constraints)?;
         log::debug!(
             "creating memory pool: {constraints:?} -> {layout:?} (total: {})",
@@ -285,6 +301,8 @@ impl MemoryPool {
                 config.linear_memory_keep_resident,
             )?,
             next_available_pkey: AtomicUsize::new(0),
+            kind,
+            max_memory_size,
         };
 
         Ok(pool)
@@ -300,8 +318,21 @@ impl MemoryPool {
         self.stripes[index].pkey
     }
 
+    fn tunables_for_memory<'a>(&self, tunables: &'a Tunables) -> Cow<'a, Tunables> {
+        match self.kind {
+            MemoryPoolKind::Default => Cow::Borrowed(tunables),
+            MemoryPoolKind::PageSize1 => {
+                let mut tunables = tunables.clone();
+                tunables.memory_reservation =
+                    u64::try_from(self.layout.slot_bytes.byte_count()).unwrap();
+                tunables.memory_guard_size = 0;
+                Cow::Owned(tunables)
+            }
+        }
+    }
+
     /// Validate whether this memory pool supports the given module.
-    pub fn validate_memories(&self, module: &Module) -> Result<()> {
+    pub fn validate_memories(&self, module: &Module, include_page_size_1: bool) -> Result<()> {
         let memories = module.num_defined_memories();
         if memories > self.memories_per_instance {
             bail!(
@@ -312,6 +343,12 @@ impl MemoryPool {
         }
 
         for (i, memory) in module.memories.iter().skip(module.num_imported_memories) {
+            let is_page_size_1 = memory.page_size_log2 == 0;
+            if is_page_size_1 && !include_page_size_1
+                || !is_page_size_1 && self.kind == MemoryPoolKind::PageSize1
+            {
+                continue;
+            }
             self.validate_memory(memory).with_context(|| {
                 format!(
                     "memory index {} is unsupported in this pooling allocator configuration",
@@ -327,11 +364,17 @@ impl MemoryPool {
         let min = memory.minimum_byte_size().with_context(|| {
             format!("memory has a minimum byte size that cannot be represented in a u64",)
         })?;
-        if min > u64::try_from(self.layout.max_memory_bytes.byte_count()).unwrap() {
+        let max = match self.kind {
+            MemoryPoolKind::Default => {
+                u64::try_from(self.layout.max_memory_bytes.byte_count()).unwrap()
+            }
+            MemoryPoolKind::PageSize1 => u64::try_from(self.max_memory_size).unwrap(),
+        };
+        if min > max {
             bail!(
-                "memory has a minimum byte size of {} which exceeds the limit of {} bytes",
+                "memory has a minimum byte size of {} which exceeds the limit of {:#x} bytes",
                 min,
-                self.layout.max_memory_bytes,
+                max,
             );
         }
         if memory.shared {
@@ -357,13 +400,21 @@ impl MemoryPool {
         ty: &wasmtime_environ::Memory,
         memory_index: Option<DefinedMemoryIndex>,
     ) -> Result<(MemoryAllocationIndex, Memory)> {
-        let tunables = request.store.engine().tunables();
-        let memory_tunables = MemoryTunables::new(tunables, MemoryKind::LinearMemory);
-        let stripe_index = if let Some(pkey) = request.store.get_pkey() {
-            pkey.as_stripe()
-        } else {
-            debug_assert!(self.stripes.len() < 2);
-            0
+        let tunables = self.tunables_for_memory(request.store.engine().tunables());
+        let memory_tunables = MemoryTunables::new(&tunables, MemoryKind::LinearMemory);
+        let stripe_index = match self.kind {
+            MemoryPoolKind::PageSize1 => {
+                debug_assert_eq!(self.stripes.len(), 1);
+                0
+            }
+            MemoryPoolKind::Default => {
+                if let Some(pkey) = request.store.get_pkey() {
+                    pkey.as_stripe()
+                } else {
+                    debug_assert!(self.stripes.len() < 2);
+                    0
+                }
+            }
         };
 
         let striped_allocation_index = self.stripes[stripe_index]
@@ -388,16 +439,20 @@ impl MemoryPool {
             active: true,
         };
 
-        let allocation_index =
-            striped_allocation_index.as_unstriped_slot_index(stripe_index, self.stripes.len());
+        let allocation_index = striped_allocation_index.as_unstriped_slot_index(
+            stripe_index,
+            self.stripes.len(),
+            self.kind,
+        );
 
         // Double-check that the runtime requirements of the memory are
         // satisfied by the configuration of this pooling allocator. This
         // should be returned as an error through `validate_memory_plans`
         // but double-check here to be sure.
         assert!(
-            memory_tunables.reservation() + memory_tunables.guard_size()
-                <= u64::try_from(self.layout.bytes_to_next_stripe_slot().byte_count()).unwrap()
+            self.kind == MemoryPoolKind::PageSize1
+                || memory_tunables.reservation() + memory_tunables.guard_size()
+                    <= u64::try_from(self.layout.bytes_to_next_stripe_slot().byte_count()).unwrap()
         );
 
         let base = self.get_base(allocation_index);
@@ -433,6 +488,7 @@ impl MemoryPool {
             &memory_tunables,
             MemoryBase::Mmap(base),
             base_capacity.byte_count(),
+            (self.kind == MemoryPoolKind::PageSize1).then_some(self.max_memory_size),
             slot,
             request.limiter.as_deref_mut(),
         )
@@ -564,8 +620,11 @@ impl MemoryPool {
                     // If anything fails then the slot will be in an "unknown"
                     // state which means that on next use it'll be remapped with
                     // anonymous memory.
-                    let index = StripedAllocationIndex(id.0)
-                        .as_unstriped_slot_index(stripe_index, self.stripes.len());
+                    let index = StripedAllocationIndex(id.0).as_unstriped_slot_index(
+                        stripe_index,
+                        self.stripes.len(),
+                        self.kind,
+                    );
                     if let Ok(mut slot) = self.take_memory_image_slot(index) {
                         if slot.remove_image().is_ok() {
                             self.return_memory_image_slot(index, Some(slot));
@@ -682,14 +741,19 @@ impl StripedAllocationIndex {
     ) -> (usize, Self) {
         let stripe_index = index.index() % num_stripes;
         let num_stripes: u32 = num_stripes.try_into().unwrap();
-        let index_within_stripe = Self(index.0 / num_stripes);
+        let index_within_stripe = Self(index.index / num_stripes);
         (stripe_index, index_within_stripe)
     }
 
-    fn as_unstriped_slot_index(self, stripe: usize, num_stripes: usize) -> MemoryAllocationIndex {
+    fn as_unstriped_slot_index(
+        self,
+        stripe: usize,
+        num_stripes: usize,
+        kind: MemoryPoolKind,
+    ) -> MemoryAllocationIndex {
         let num_stripes: u32 = num_stripes.try_into().unwrap();
         let stripe: u32 = stripe.try_into().unwrap();
-        MemoryAllocationIndex(self.0 * num_stripes + stripe)
+        MemoryAllocationIndex::pooled(self.0 * num_stripes + stripe, kind)
     }
 }
 
@@ -713,6 +777,7 @@ impl SlabConstraints {
         limits: &InstanceLimits,
         tunables: &Tunables,
         num_pkeys_available: usize,
+        kind: MemoryPoolKind,
     ) -> Result<Self> {
         // `memory_reservation` is the configured number of bytes for a
         // static memory slot (see `Config::memory_reservation`); even
@@ -723,19 +788,44 @@ impl SlabConstraints {
         // though not explicitly: if we can achieve the same effect via
         // MPK-protected stripes, the slot size can be lower than the
         // `memory_reservation`.
-        let expected_slot_bytes =
-            HostAlignedByteCount::new_rounded_up_u64(tunables.memory_reservation)
-                .context("memory reservation is too large")?;
+        let expected_slot_bytes = match kind {
+            MemoryPoolKind::Default => {
+                HostAlignedByteCount::new_rounded_up_u64(tunables.memory_reservation)
+                    .context("memory reservation is too large")?
+            }
+            MemoryPoolKind::PageSize1 => {
+                HostAlignedByteCount::new_rounded_up(limits.page_size_1_memory_max_size)
+                    .context("custom-page-size memory reservation is too large")?
+            }
+        };
 
         // Page-align the maximum size of memory since that's the granularity that
         // permissions are going to be controlled at.
-        let max_memory_bytes = HostAlignedByteCount::new_rounded_up(limits.max_memory_size)
+        let max_memory_size = match kind {
+            MemoryPoolKind::Default => limits.max_memory_size,
+            MemoryPoolKind::PageSize1 => limits.page_size_1_memory_max_size,
+        };
+        let max_memory_bytes = HostAlignedByteCount::new_rounded_up(max_memory_size)
             .context("maximum size of memory is too large")?;
 
-        let guard_bytes = HostAlignedByteCount::new_rounded_up_u64(tunables.memory_guard_size)
+        let guard_size = match kind {
+            MemoryPoolKind::Default => tunables.memory_guard_size,
+            MemoryPoolKind::PageSize1 => 0,
+        };
+        let guard_bytes = HostAlignedByteCount::new_rounded_up_u64(guard_size)
             .context("guard region is too large")?;
 
-        let num_slots = usize::try_from(limits.total_memories).context("too many memories")?;
+        let num_slots = match kind {
+            MemoryPoolKind::Default => usize::try_from(limits.total_memories),
+            MemoryPoolKind::PageSize1 => {
+                let slots = limits
+                    .total_component_instances
+                    .checked_mul(limits.max_page_size_1_memories_per_component)
+                    .context("too many page-size-1 memories")?;
+                usize::try_from(slots)
+            }
+        }
+        .context("too many memories")?;
 
         let constraints = SlabConstraints {
             max_memory_bytes,
@@ -743,7 +833,8 @@ impl SlabConstraints {
             expected_slot_bytes,
             num_pkeys_available,
             guard_bytes,
-            guard_before_slots: tunables.guard_before_linear_memory,
+            guard_before_slots: kind == MemoryPoolKind::Default
+                && tunables.guard_before_linear_memory,
         };
         Ok(constraints)
     }
@@ -951,6 +1042,7 @@ mod tests {
                 memory_guard_size: 0,
                 ..Tunables::default_host()
             },
+            MemoryPoolKind::Default,
         )?;
 
         assert_eq!(pool.layout.slot_bytes, WASM_PAGE_SIZE as usize);
@@ -960,7 +1052,7 @@ mod tests {
         let base = pool.mapping.as_ptr() as usize;
 
         for i in 0..5 {
-            let index = MemoryAllocationIndex(i);
+            let index = MemoryAllocationIndex::pooled(i, MemoryPoolKind::Default);
             let ptr = pool.get_base(index).as_mut_ptr();
             assert_eq!(
                 ptr as usize - base,
@@ -984,7 +1076,8 @@ mod tests {
             memory_protection_keys: Enabled::Yes,
             ..PoolingAllocationConfig::default()
         };
-        let pool = MemoryPool::new(&config, &Tunables::default_host()).unwrap();
+        let pool =
+            MemoryPool::new(&config, &Tunables::default_host(), MemoryPoolKind::Default).unwrap();
         assert!(pool.stripes.len() >= 2);
 
         let max_memory_slots = config.limits.total_memories;

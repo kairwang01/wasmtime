@@ -266,10 +266,15 @@ impl Memory {
         memory_tunables: &MemoryTunables<'_>,
         base: MemoryBase,
         base_capacity: usize,
+        maximum_size: Option<usize>,
         memory_image: MemoryImageSlot,
         limiter: Option<&mut StoreResourceLimiter<'_>>,
     ) -> Result<Self> {
-        let (minimum, maximum) = Self::limit_new(ty, limiter).await?;
+        let (minimum, type_maximum) = Self::limit_new(ty, limiter).await?;
+        let maximum = match (type_maximum, maximum_size) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let pooled_memory = StaticMemory::new(base, base_capacity, minimum, maximum)?;
         let allocation = try_new::<Box<_>>(pooled_memory)?;
 

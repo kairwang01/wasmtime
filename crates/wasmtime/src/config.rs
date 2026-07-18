@@ -3926,6 +3926,10 @@ pub(crate) struct InstanceLimits {
     /// transitively contain.
     pub(crate) max_memories_per_component: u32,
 
+    /// The maximum number of custom-page-size memories that a component may
+    /// transitively contain when the dedicated pool is enabled.
+    pub(crate) max_page_size_1_memories_per_component: u32,
+
     /// The maximum number of tables that a component may transitively contain.
     pub(crate) max_tables_per_component: u32,
 
@@ -3958,6 +3962,10 @@ pub(crate) struct InstanceLimits {
     /// `memory_reservation` in `Tunables`.
     pub(crate) max_memory_size: usize,
 
+    /// Maximum byte size of a memory in the dedicated custom-page-size pool.
+    /// Zero disables that pool.
+    pub(crate) page_size_1_memory_max_size: usize,
+
     /// The total number of GC heaps in the pool, across all instances.
     pub(crate) total_gc_heaps: u32,
 }
@@ -3977,6 +3985,7 @@ impl Default for InstanceLimits {
             total_core_instances: total,
             max_core_instances_per_component: u32::MAX,
             max_memories_per_component: u32::MAX,
+            max_page_size_1_memories_per_component: 0,
             max_tables_per_component: u32::MAX,
             total_memories: total,
             total_tables: total,
@@ -3991,6 +4000,7 @@ impl Default for InstanceLimits {
             max_memory_size: 1 << 32, // 4G,
             #[cfg(target_pointer_width = "32")]
             max_memory_size: 10 << 20, // 10 MiB
+            page_size_1_memory_max_size: 0,
             total_gc_heaps: total,
         }
     }
@@ -4003,8 +4013,8 @@ impl PoolingAllocationConfig {
         PoolingAllocationConfig::default()
     }
 
-    /// Configures the maximum number of "unused warm slots" to retain in the
-    /// pooling allocator.
+    /// Configures the maximum number of "unused warm slots" to retain in each
+    /// pool managed by the pooling allocator.
     ///
     /// The pooling allocator operates over slots to allocate from, and each
     /// slot is considered "cold" if it's never been used before or "warm" if
@@ -4031,8 +4041,10 @@ impl PoolingAllocationConfig {
     ///   the non-affine slots are allocated from.
     ///
     /// This setting, `max_unused_warm_slots`, is the value for N in the above
-    /// algorithm. The purpose of this setting is to have a knob over the RSS
-    /// impact of "unused slots" for a long-running wasm server.
+    /// algorithm. It is applied independently to the ordinary memory pool and,
+    /// when configured, the one-byte-page memory pool. The purpose of this
+    /// setting is to have a knob over the RSS impact of "unused slots" for a
+    /// long-running wasm server.
     ///
     /// If this setting is set to 0, for example, then affine slots are
     /// aggressively reused on a least-recently-used basis. A "cold" slot is
@@ -4205,6 +4217,10 @@ impl PoolingAllocationConfig {
     /// The maximum number of Wasm linear memories that a single component may
     /// transitively contain (default is unlimited).
     ///
+    /// When the dedicated one-byte-page memory pool is enabled, memories in
+    /// that pool instead count against
+    /// [`PoolingAllocationConfig::max_page_size_1_memories_per_component`].
+    ///
     /// This method (along with
     /// [`PoolingAllocationConfig::max_core_instances_per_component`],
     /// [`PoolingAllocationConfig::max_tables_per_component`], and
@@ -4215,6 +4231,20 @@ impl PoolingAllocationConfig {
     /// then the component will fail to instantiate.
     pub fn max_memories_per_component(&mut self, count: u32) -> &mut Self {
         self.limits.max_memories_per_component = count;
+        self
+    }
+
+    /// Configures the maximum number of one-byte-page memories that a single
+    /// component may transitively contain in the dedicated memory pool.
+    ///
+    /// This and [`Self::page_size_1_memory_max_size`] both default to zero.
+    /// Leaving both at zero preserves the shared pool and counts these memories
+    /// against the ordinary memory limits. Setting exactly one of the two to
+    /// zero is invalid. When both are non-zero, one-byte-page memories have a
+    /// separate per-component limit and a total concurrent capacity equal to
+    /// this value multiplied by [`Self::total_component_instances`].
+    pub fn max_page_size_1_memories_per_component(&mut self, count: u32) -> &mut Self {
+        self.limits.max_page_size_1_memories_per_component = count;
         self
     }
 
@@ -4236,6 +4266,9 @@ impl PoolingAllocationConfig {
 
     /// The maximum number of concurrent Wasm linear memories supported (default
     /// is `1000`).
+    ///
+    /// When the dedicated one-byte-page memory pool is enabled, its slots are
+    /// provisioned separately and do not count against this limit.
     ///
     /// This value has a direct impact on the amount of memory allocated by the pooling
     /// instance allocator.
@@ -4406,6 +4439,17 @@ impl PoolingAllocationConfig {
     /// configuration cannot exceed [`Config::memory_reservation`].
     pub fn max_memory_size(&mut self, bytes: usize) -> &mut Self {
         self.limits.max_memory_size = bytes;
+        self
+    }
+
+    /// Configures the maximum byte size of each one-byte-page memory in the
+    /// dedicated pool.
+    ///
+    /// This defaults to zero and must be non-zero exactly when
+    /// [`Self::max_page_size_1_memories_per_component`] is non-zero. The byte
+    /// limit is independent of [`Self::max_memory_size`].
+    pub fn page_size_1_memory_max_size(&mut self, bytes: usize) -> &mut Self {
+        self.limits.page_size_1_memory_max_size = bytes;
         self
     }
 
@@ -4618,6 +4662,11 @@ impl PoolingAllocationConfig {
         self.limits.max_memory_size
     }
 
+    /// Returns the configured maximum byte size for one-byte-page memories.
+    pub fn get_page_size_1_memory_max_size(&self) -> usize {
+        self.limits.page_size_1_memory_max_size
+    }
+
     /// Returns the configured
     /// [`PoolingAllocationConfig::table_elements`], if enabled.
     pub fn get_table_elements(&self) -> usize {
@@ -4649,6 +4698,11 @@ impl PoolingAllocationConfig {
     /// enabled.
     pub fn get_max_memories_per_component(&self) -> u32 {
         self.limits.max_memories_per_component
+    }
+
+    /// Returns the configured per-component limit for one-byte-page memories.
+    pub fn get_max_page_size_1_memories_per_component(&self) -> u32 {
+        self.limits.max_page_size_1_memories_per_component
     }
 
     /// Returns the configured

@@ -57,13 +57,25 @@ pub struct InstanceAllocationRequest<'a, 'b> {
 
 /// The index of a memory allocation within an `InstanceAllocator`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub struct MemoryAllocationIndex(u32);
+pub struct MemoryAllocationIndex {
+    index: u32,
+    pool: MemoryPoolKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub(crate) enum MemoryPoolKind {
+    Default,
+    PageSize1,
+}
 
 impl Default for MemoryAllocationIndex {
     fn default() -> Self {
         // A default `MemoryAllocationIndex` that can be used with
         // `InstanceAllocator`s that don't actually need indices.
-        MemoryAllocationIndex(u32::MAX)
+        MemoryAllocationIndex {
+            index: u32::MAX,
+            pool: MemoryPoolKind::Default,
+        }
     }
 }
 
@@ -71,7 +83,17 @@ impl MemoryAllocationIndex {
     /// Get the underlying index of this `MemoryAllocationIndex`.
     #[cfg(feature = "pooling-allocator")]
     pub fn index(&self) -> usize {
-        self.0 as usize
+        self.index as usize
+    }
+
+    #[cfg(feature = "pooling-allocator")]
+    pub(crate) fn pooled(index: u32, pool: MemoryPoolKind) -> Self {
+        Self { index, pool }
+    }
+
+    #[cfg(feature = "pooling-allocator")]
+    pub(crate) fn pool(&self) -> MemoryPoolKind {
+        self.pool
     }
 }
 

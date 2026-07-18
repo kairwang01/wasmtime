@@ -157,6 +157,10 @@ wasmtime_option_group! {
         /// allocator, in bytes.
         pub pooling_max_memory_size: Option<usize>,
 
+        /// The maximum runtime size of each one-byte-page memory in its
+        /// dedicated pooling allocator pool, in bytes.
+        pub pooling_page_size_1_memory_max_size: Option<usize>,
+
         /// The maximum table elements for any table defined in a module when
         /// using the pooling allocator.
         pub pooling_table_elements: Option<usize>,
@@ -184,6 +188,10 @@ wasmtime_option_group! {
         /// The maximum number of Wasm linear memories that a single component may
         /// transitively contain (default is unlimited).
         pub pooling_max_memories_per_component: Option<u32>,
+
+        /// The maximum number of one-byte-page memories that a single component
+        /// may transitively contain in their dedicated pool.
+        pub pooling_max_page_size_1_memories_per_component: Option<u32>,
 
         /// The maximum number of tables that a single component may transitively
         /// contain (default is unlimited).
@@ -1102,6 +1110,9 @@ impl CommonOptions {
                     {
                         cfg.max_memory_size(max);
                     }
+                    if let Some(max) = self.opts.pooling_page_size_1_memory_max_size {
+                        cfg.page_size_1_memory_max_size(max);
+                    }
                     if let Some(size) = self.opts.pooling_decommit_batch_size {
                         cfg.decommit_batch_size(size);
                     }
@@ -1121,6 +1132,11 @@ impl CommonOptions {
                     }
                     if let Some(max) = self.opts.pooling_max_memories_per_component {
                         cfg.max_memories_per_component(max);
+                    }
+                    if let Some(max) =
+                        self.opts.pooling_max_page_size_1_memories_per_component
+                    {
+                        cfg.max_page_size_1_memories_per_component(max);
                     }
                     if let Some(max) = self.opts.pooling_max_tables_per_component {
                         cfg.max_tables_per_component(max);
@@ -1363,6 +1379,8 @@ impl CommonOptions {
                 pooling_total_memories: pooling.map(|c| c.get_total_memories()),
                 pooling_total_tables: pooling.map(|c| c.get_total_tables()),
                 pooling_max_memory_size: pooling.map(|c| c.get_max_memory_size()),
+                pooling_page_size_1_memory_max_size: pooling
+                    .map(|c| c.get_page_size_1_memory_max_size()),
                 pooling_table_elements: pooling.map(|c| c.get_table_elements()),
                 pooling_max_core_instance_size: pooling.map(|c| c.get_max_core_instance_size()),
                 pooling_max_component_instance_size: pooling
@@ -1371,6 +1389,8 @@ impl CommonOptions {
                     .map(|c| c.get_max_core_instances_per_component()),
                 pooling_max_memories_per_component: pooling
                     .map(|c| c.get_max_memories_per_component()),
+                pooling_max_page_size_1_memories_per_component: pooling
+                    .map(|c| c.get_max_page_size_1_memories_per_component()),
                 pooling_max_tables_per_component: pooling.map(|c| c.get_max_tables_per_component()),
                 pooling_max_tables_per_module: pooling.map(|c| c.get_max_tables_per_module()),
                 pooling_max_memories_per_module: pooling.map(|c| c.get_max_memories_per_module()),

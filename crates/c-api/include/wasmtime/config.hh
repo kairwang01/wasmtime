@@ -160,7 +160,16 @@ class PoolAllocationConfig {
   /// https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.max_memories_per_component.
   void max_memories_per_component(uint32_t count) {
     wasmtime_pooling_allocation_config_max_memories_per_component_set(ptr.get(),
-                                                                      count);
+                                                                     count);
+  }
+
+  /// \brief The maximum number of one-byte-page memories that a single
+  /// component may transitively contain in their dedicated pool.
+  ///
+  /// https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.max_page_size_1_memories_per_component.
+  void max_page_size_1_memories_per_component(uint32_t count) {
+    wasmtime_pooling_allocation_config_max_page_size_1_memories_per_component_set(
+        ptr.get(), count);
   }
 
   /// \brief The maximum number of tables that a single component may
@@ -248,6 +257,15 @@ class PoolAllocationConfig {
   /// https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.max_memory_size.
   void max_memory_size(size_t bytes) {
     wasmtime_pooling_allocation_config_max_memory_size_set(ptr.get(), bytes);
+  }
+
+  /// \brief The maximum byte size that a one-byte-page WebAssembly linear
+  /// memory may grow to when its dedicated pool is enabled.
+  ///
+  /// https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.page_size_1_memory_max_size.
+  void page_size_1_memory_max_size(size_t bytes) {
+    wasmtime_pooling_allocation_config_page_size_1_memory_max_size_set(ptr.get(),
+                                                                      bytes);
   }
 
   /// \brief The maximum number of concurrent GC heaps supported (default is

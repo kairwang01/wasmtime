@@ -8,7 +8,7 @@
 //! disabled by specifying a batch size of one, in which case, this queue will
 //! immediately get flushed every time we push onto it.
 
-use super::PoolingInstanceAllocator;
+use super::{MemoryPoolKind, PoolingInstanceAllocator};
 use crate::vm::sys::vm::{decommit_pages, iovec};
 use crate::vm::{MemoryAllocationIndex, MemoryImageSlot, Table, TableAllocationIndex};
 use smallvec::SmallVec;
@@ -178,24 +178,33 @@ impl DecommitQueue {
         let mut deallocated_any = false;
         if !self.memories.is_empty() {
             deallocated_any = true;
-            unsafe {
-                pool.memories.deallocate_many(self.memories.into_iter().map(
-                    |(allocation_index, image, bytes_resident)| {
-                        // Note that for memory images the images are all dropped
-                        // here and ignored if any decommits failed. This signifies
-                        // how the state of the slot is unknown and needs to be
-                        // paved over in the future. Also note that
-                        // `bytes_resident` is probably too low, but there's no
-                        // other precise way to know, so it's left here as-is and
-                        // it'll get reset when the slot is reused.
-                        let image = if decommit_succeeded {
-                            Some(image)
-                        } else {
-                            None
-                        };
-                        (allocation_index, image, bytes_resident)
+            let mut default =
+                SmallVec::<[(MemoryAllocationIndex, Option<MemoryImageSlot>, usize); 1]>::new();
+            let mut page_size_1 =
+                SmallVec::<[(MemoryAllocationIndex, Option<MemoryImageSlot>, usize); 1]>::new();
+            for (allocation_index, image, bytes_resident) in self.memories {
+                let item = (
+                    allocation_index,
+                    if decommit_succeeded {
+                        Some(image)
+                    } else {
+                        None
                     },
-                ));
+                    bytes_resident,
+                );
+                match allocation_index.pool() {
+                    MemoryPoolKind::Default => default.push(item),
+                    MemoryPoolKind::PageSize1 => page_size_1.push(item),
+                }
+            }
+            unsafe {
+                pool.memories.deallocate_many(default.into_iter());
+                if !page_size_1.is_empty() {
+                    pool.page_size_1_memories
+                        .as_ref()
+                        .unwrap()
+                        .deallocate_many(page_size_1.into_iter());
+                }
             }
         }
         if !self.tables.is_empty() {

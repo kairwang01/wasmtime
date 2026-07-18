@@ -60,7 +60,15 @@ impl PoolingAllocatorMetrics {
     /// in that slot. Warm slots are favored in general for allocating new
     /// memories over using a slot that has never been used before.
     pub fn unused_warm_memories(&self) -> u32 {
-        self.allocator().memories.unused_warm_slots()
+        self.allocator()
+            .memories
+            .unused_warm_slots()
+            .saturating_add(
+                self.allocator()
+                    .page_size_1_memories
+                    .as_ref()
+                    .map_or(0, |pool| pool.unused_warm_slots()),
+            )
     }
 
     /// Returns the number of bytes in this pooling allocator which are not part
@@ -68,6 +76,11 @@ impl PoolingAllocatorMetrics {
     /// resident via the `*_keep_resident` configuration options.
     pub fn unused_memory_bytes_resident(&self) -> usize {
         self.allocator().memories.unused_bytes_resident()
+            + self
+                .allocator()
+                .page_size_1_memories
+                .as_ref()
+                .map_or(0, |pool| pool.unused_bytes_resident())
     }
 
     /// Returns the number of slots for tables in this allocator which are not

@@ -622,6 +622,15 @@ pub extern "C" fn wasmtime_pooling_allocation_config_max_memories_per_component_
 
 #[unsafe(no_mangle)]
 #[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_max_page_size_1_memories_per_component_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    count: u32,
+) {
+    c.config.max_page_size_1_memories_per_component(count);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
 pub extern "C" fn wasmtime_pooling_allocation_config_max_tables_per_component_set(
     c: &mut wasmtime_pooling_allocation_config_t,
     count: u32,
@@ -708,6 +717,15 @@ pub extern "C" fn wasmtime_pooling_allocation_config_max_memory_size_set(
     bytes: usize,
 ) {
     c.config.max_memory_size(bytes);
+}
+
+#[unsafe(no_mangle)]
+#[cfg(feature = "pooling-allocator")]
+pub extern "C" fn wasmtime_pooling_allocation_config_page_size_1_memory_max_size_set(
+    c: &mut wasmtime_pooling_allocation_config_t,
+    bytes: usize,
+) {
+    c.config.page_size_1_memory_max_size(bytes);
 }
 
 #[unsafe(no_mangle)]

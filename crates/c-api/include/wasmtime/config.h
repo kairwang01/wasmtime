@@ -769,6 +769,16 @@ WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(max_core_instances_per_component,
 WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(max_memories_per_component, uint32_t)
 
 /**
+ * \brief The maximum number of one-byte-page memories that a single component
+ * may transitively contain in their dedicated pool.
+ *
+ * For more information see the Rust documentation at
+ * https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.max_page_size_1_memories_per_component.
+ */
+WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(
+    max_page_size_1_memories_per_component, uint32_t)
+
+/**
  * \brief The maximum number of tables that a single component may transitively
  * contain (default is unlimited).
  *
@@ -856,6 +866,15 @@ WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(max_memories_per_module, uint32_t)
  * https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.max_memory_size.
  */
 WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(max_memory_size, size_t)
+
+/**
+ * \brief The maximum byte size that a one-byte-page WebAssembly linear memory
+ * may grow to when its dedicated pool is enabled.
+ *
+ * For more information see the Rust documentation at
+ * https://docs.wasmtime.dev/api/wasmtime/struct.PoolingAllocationConfig.html#method.page_size_1_memory_max_size.
+ */
+WASMTIME_POOLING_ALLOCATION_CONFIG_PROP(page_size_1_memory_max_size, size_t)
 
 /**
  * \brief The maximum number of concurrent GC heaps supported (default is 1000).
