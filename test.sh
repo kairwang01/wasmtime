@@ -20,6 +20,24 @@ RUST_FEATURES="run,serve,cranelift,wat,pooling-allocator,component-model-async"
 C_API_FEATURES="async,profiling,cache,threads,gc,cranelift,wat,pooling-allocator,component-model"
 C_API_HEADER_DIR="target/c-api-config"
 C_API_LIBRARY_DIR="target/debug"
+PAGE_SIZE_1_RUST_TESTS=(
+  page_size_1_pool_capacities_are_independent
+  page_size_1_pool_capacity_is_exact_product
+  page_size_1_pool_cli_options_round_trip
+  page_size_1_pool_component_limits_are_independent
+  page_size_1_pool_configuration
+  page_size_1_pool_does_not_limit_host_created_memories
+  page_size_1_pool_fallback_preserves_component_limit
+  page_size_1_pool_falls_back_to_shared_capacity
+  page_size_1_pool_metrics_include_both_pools
+  page_size_1_pool_mixed_decommit_recycles_both_pools
+  page_size_1_pool_preserves_module_memory_limit
+  page_size_1_pool_purges_dropped_modules_from_both_pools
+  page_size_1_pool_reuse_resets_memory
+  page_size_1_pool_size_and_growth_limits_are_independent
+  page_size_1_pool_toml_options_round_trip
+  page_size_1_pool_validates_capacity_edges
+)
 
 export CARGO_BUILD_JOBS=4
 export CARGO_INCREMENTAL=0
@@ -72,17 +90,78 @@ write_cargo_report() {
   local status="$2"
   local log="$3"
   local report="$4"
-  python3 - "$name" "$status" "$log" "$report" <<'PY'
+  shift 4
+  python3 - "$name" "$status" "$log" "$report" "$@" <<'PY'
 import pathlib
 import re
 import sys
 import xml.etree.ElementTree as ET
 
-name, status_text, log_path, report_path = sys.argv[1:]
+name, status_text, log_path, report_path, *expected_tests = sys.argv[1:]
 status = int(status_text)
 log = pathlib.Path(log_path).read_text(errors="replace")
 pattern = re.compile(r"^test (.+) \.\.\. (ok|FAILED|ignored(?:,.*)?)$", re.MULTILINE)
 results = pattern.findall(log)
+
+if expected_tests:
+    outcomes = dict(results)
+    missing = [test_name for test_name in expected_tests if test_name not in outcomes]
+    unexpected = [test_name for test_name, _ in results if test_name not in expected_tests]
+    failed = {
+        test_name
+        for test_name, outcome in results
+        if test_name in expected_tests and outcome == "FAILED"
+    }
+    failed_cases = failed.union(missing)
+    if status != 0 and not failed_cases:
+        failed_cases.add(expected_tests[0])
+    elif status == 0 and unexpected and not failed_cases:
+        failed_cases.add(expected_tests[0])
+
+    count = len(expected_tests)
+    skipped_cases = {
+        test_name
+        for test_name in expected_tests
+        if outcomes.get(test_name, "").startswith("ignored")
+        and test_name not in failed_cases
+    }
+    root = ET.Element(
+        "testsuites",
+        name="wasmtime-selected-tests",
+        tests=str(count),
+        failures=str(len(failed_cases)),
+        errors="0",
+        skipped=str(len(skipped_cases)),
+        time="0",
+    )
+    suite = ET.SubElement(
+        root,
+        "testsuite",
+        name=name,
+        tests=str(count),
+        failures=str(len(failed_cases)),
+        errors="0",
+        skipped=str(len(skipped_cases)),
+        time="0",
+    )
+    for test_name in expected_tests:
+        case = ET.SubElement(suite, "testcase", name=test_name, classname=name, time="0")
+        outcome = outcomes.get(test_name)
+        if test_name in missing:
+            message = (
+                f"cargo exited with status {status} before this test ran"
+                if status
+                else "expected test was not discovered"
+            )
+            ET.SubElement(case, "failure", message=message)
+        elif test_name in failed_cases:
+            message = "test failed" if outcome == "FAILED" else f"cargo exited with status {status}"
+            ET.SubElement(case, "failure", message=message)
+        elif test_name in skipped_cases:
+            ET.SubElement(case, "skipped")
+    ET.SubElement(suite, "system-out").text = log[-200_000:]
+    ET.ElementTree(root).write(report_path, encoding="utf-8", xml_declaration=True)
+    sys.exit(3 if status == 0 and (failed_cases or unexpected) else 0)
 
 if not results:
     root = ET.Element(
@@ -161,6 +240,10 @@ run_rust_tests() {
   local name="$1"
   local report="$RUN_DIR/$name.xml"
   local log="$RUN_DIR/$name.log"
+  local expected_tests=()
+  if [ "$name" = "rust-page-size-1-pool" ]; then
+    expected_tests=("${PAGE_SIZE_1_RUST_TESTS[@]}")
+  fi
   shift
 
   cargo test \
@@ -169,7 +252,7 @@ run_rust_tests() {
     "$@" 2>&1 | tee "$log"
   local status=${PIPESTATUS[0]}
 
-  write_cargo_report "$name" "$status" "$log" "$report"
+  write_cargo_report "$name" "$status" "$log" "$report" "${expected_tests[@]}"
   local report_status=$?
   if [ "$status" -eq 0 ] && [ "$report_status" -ne 0 ]; then
     status=1
